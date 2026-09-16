@@ -16,9 +16,9 @@ jobs:
       run:
         working-directory: android
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -51,32 +51,7 @@ jobs:
           api-level: 29
           arch: x86_64
           disable-animations: true
-          script: |
-            set -euo pipefail
-            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-            adb logcat -c
-            adb shell am force-stop com.xiaoyi.xinyuenovel
-            adb shell am start -n com.xiaoyi.xinyuenovel/.MainActivity
-
-            ready=0
-            for i in $(seq 1 60); do
-              if adb logcat -d -s XinyueNovel:I '*:S' | grep -q "XINYUE_APP_READY"; then
-                ready=1
-                break
-              fi
-              sleep 1
-            done
-
-            if [ "$ready" -ne 1 ]; then
-              echo "App did not report JavaScript/UI readiness within 60 seconds."
-              adb shell dumpsys activity activities | grep -E "xinyuenovel|mResumedActivity|topResumedActivity" || true
-              adb logcat -d -t 400 || true
-              exit 1
-            fi
-
-            adb shell pidof com.xiaoyi.xinyuenovel
-            adb shell dumpsys activity activities | grep -q "com.xiaoyi.xinyuenovel/.MainActivity"
-            echo "XinyueNovel startup smoke test: PASS"
+          script: bash android/ci/emulator-smoke-test.sh
 
       - name: Upload APK
         if: always()
