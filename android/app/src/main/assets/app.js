@@ -287,5 +287,6 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     state = loadState(); bind(); loadSettingsUI(); loadProjectToUI();
+    if (window.Native && Native.reportReady) Native.reportReady();
   });
 })();

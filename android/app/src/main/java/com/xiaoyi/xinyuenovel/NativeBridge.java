@@ -29,6 +29,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import android.util.Base64;
+import android.util.Log;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -55,7 +56,12 @@ public final class NativeBridge {
 
     @JavascriptInterface
     public String appVersion() {
-        return "4.1.3-android.1";
+        return "4.1.3-android.2";
+    }
+
+    @JavascriptInterface
+    public void reportReady() {
+        Log.i("XinyueNovel", "XINYUE_APP_READY");
     }
 
     @JavascriptInterface
