@@ -1,0 +1,14 @@
+# 心阅小说 - 本地/构建产物
+*.exe
+*.log
+*.tmp
+*.bak
+*.user
+.env
+settings.json
+api_key.dat
+release/
+dist/
+build/
+.DS_Store
+Thumbs.db
