@@ -1,16 +1,20 @@
-# 构建与测试状态
+# v6.1 Multi-AI 验证状态
 
-## 已在当前环境完成
+当前制作环境已完成：
 
-- 原 Windows Go 源码：`go test ./...` 通过。
-- Android 版核心 JavaScript：语法检查通过。
-- Android 版业务核心单元测试：`node tests/core_test.js` 通过。
-- Android UI/Bridge 静态一致性测试：`python tests/static_app_test.py` 通过（检查 60 个 UI ID、9 个原生桥接接口）。
-- Android Java 源码：已使用本地 API 桩进行 `javac` 语法/类型检查，通过。
+- `core.js` JavaScript 语法检查：PASS
+- `app.js` JavaScript 语法检查：PASS
+- 业务核心单元测试：PASS
+  - 9 个 AI provider 预设存在
+  - 删除普通章节：PASS
+  - 删除唯一章节并自动创建空白章：PASS
+  - 删除后 currentChapterId 更新：PASS
+  - 豆包 Responses / Gemini 最新默认配置静态检查：PASS
+- UI / Native Bridge 静态一致性：PASS
+- WebChromeClient 存在性检查：PASS（确保 confirm/prompt 可用，修复“删除本章无反应”）
+- Android Java 使用 API 桩执行 `javac` 语法/类型检查：PASS
+- Windows updater：交叉编译为 PE32+ x64 GUI EXE
 
-## APK 构建
+未在当前容器内执行真实第三方 API Key 联网测试，因为没有用户的 API Key；APP 内提供“测试连接”按钮，可分别验证每个平台的真实凭据和模型。
 
-当前执行容器没有 Android SDK/Build Tools，且该容器不能联网安装 SDK，因此不能在此容器内诚实地声称已经产出并安装验证 APK。
-工程已内置 GitHub Actions：在标准 Android SDK 环境中会自动运行上述测试、编译 `app-debug.apk`，并在 Android 29 模拟器中执行安装/启动冒烟测试，最后上传 APK Artifact。
-
-这不是源码缺失：Android 工程、构建配置、测试和 CI 均已准备好。
+APK 编译与模拟器启动由 `.github/workflows/android-apk.yml` 在 GitHub Actions 中执行。

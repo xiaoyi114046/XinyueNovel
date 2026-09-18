@@ -4,12 +4,14 @@ import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Toast;
 
-public final class MainActivity extends Activity {
+public class MainActivity extends Activity {
     private WebView webView;
     private NativeBridge bridge;
 
@@ -18,48 +20,40 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         webView = new WebView(this);
-        WebSettings ws = webView.getSettings();
-        ws.setJavaScriptEnabled(true);
-        ws.setDomStorageEnabled(true);
-        ws.setDatabaseEnabled(true);
-        ws.setAllowFileAccess(true);
-        ws.setAllowContentAccess(true);
-        ws.setAllowFileAccessFromFileURLs(false);
-        ws.setAllowUniversalAccessFromFileURLs(false);
-        ws.setTextZoom(100);
-        ws.setDefaultTextEncodingName("UTF-8");
-        ws.setCacheMode(WebSettings.LOAD_DEFAULT);
+        setContentView(webView);
+
+        WebSettings s = webView.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setAllowFileAccess(true);
+        s.setAllowContentAccess(false);
+        s.setDatabaseEnabled(true);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        s.setUserAgentString(s.getUserAgentString() + " XinyueNovel/6.1");
 
         bridge = new NativeBridge(this, webView);
-        webView.addJavascriptInterface(bridge, "Native");
+        webView.addJavascriptInterface(bridge, "Android");
+        // Required for JavaScript alert/confirm/prompt dialogs.
+        // Without a WebChromeClient, actions such as “删除本章” that use confirm()
+        // may appear to do nothing on Android WebView.
+        webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return handleNavigation(request == null ? null : request.getUrl());
-            }
-
-            @SuppressWarnings("deprecation")
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                return handleNavigation(url == null ? null : Uri.parse(url));
-            }
-
-            private boolean handleNavigation(Uri uri) {
-                if (uri == null) return true;
-                String u = uri.toString();
-                if (u.startsWith("file:///android_asset/") || u.startsWith("file:///android_res/")) return false;
-                String scheme = uri.getScheme();
-                if ("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme)) {
-                    try {
-                        startActivity(new Intent(Intent.ACTION_VIEW, uri));
-                    } catch (Exception ignored) {
-                        // Keep untrusted web content out of this WebView because it owns a JS bridge.
-                    }
+                Uri uri = request.getUrl();
+                if ("file".equalsIgnoreCase(uri.getScheme()) &&
+                    uri.toString().startsWith("file:///android_asset/")) {
+                    return false;
+                }
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "无法打开外部链接", Toast.LENGTH_SHORT).show();
                 }
                 return true;
             }
         });
-        setContentView(webView);
+
         webView.loadUrl("file:///android_asset/index.html");
     }
 
@@ -76,7 +70,7 @@ public final class MainActivity extends Activity {
     protected void onDestroy() {
         if (bridge != null) bridge.shutdown();
         if (webView != null) {
-            webView.removeJavascriptInterface("Native");
+            webView.removeJavascriptInterface("Android");
             webView.destroy();
         }
         super.onDestroy();

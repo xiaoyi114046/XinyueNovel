@@ -5,16 +5,13 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@drawable/icon"
         android:label="心阅小说"
-        android:usesCleartextTraffic="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:usesCleartextTraffic="false"
+        android:theme="@style/AppTheme">
         <activity
             android:name=".MainActivity"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|uiMode"
             android:exported="true"
-            android:screenOrientation="unspecified"
-            android:windowSoftInputMode="adjustResize">
+            android:screenOrientation="unspecified">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

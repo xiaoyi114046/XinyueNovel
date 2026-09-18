@@ -1,292 +1,343 @@
 (() => {
   'use strict';
   const C = window.XinyueCore;
-  const STORAGE_KEY = 'xinyue_state_v4_1_3_android';
+  const STATE_KEY = 'xinyue_state_v6';
+  const PROVIDER_KEY = 'xinyue_provider_configs_v6';
   const $ = id => document.getElementById(id);
-  let state;
-  let selectedChapterNo = null;
-  let pending = new Map();
-  let activeRequestId = null;
-  let statusTimer = null;
+  const qsa = sel => Array.from(document.querySelectorAll(sel));
 
-  function defaultState() {
-    const p = C.newProject('我的小说');
-    return {
-      version: 1,
-      currentId: p.id,
-      projects: [p],
-      settings: { endpoint: C.DEFAULT_ENDPOINT, model: 'deepseek-chat', thinking: '关闭', rememberKey: true }
-    };
-  }
+  let state = loadState();
+  let providerConfigs = loadProviderConfigs();
+  let activeRequestId = '';
+  let activeRequestKind = '';
+
+  function android() { return typeof window.Android !== 'undefined' ? window.Android : null; }
+  function nowId(prefix) { return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7); }
+  function safeParse(v, fallback) { try { return JSON.parse(v); } catch (_) { return fallback; } }
+  function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
   function loadState() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      const x = raw ? JSON.parse(raw) : defaultState();
-      x.projects = Array.isArray(x.projects) && x.projects.length ? x.projects.map(C.normalizeProject) : [C.newProject('我的小说')];
-      x.currentId = x.projects.some(p => p.id === x.currentId) ? x.currentId : x.projects[0].id;
-      x.settings = Object.assign({ endpoint: C.DEFAULT_ENDPOINT, model: 'deepseek-chat', thinking: '关闭', rememberKey: true }, x.settings || {});
-      return x;
-    } catch (e) {
-      return defaultState();
+    const existing = safeParse(localStorage.getItem(STATE_KEY), null);
+    if (existing && Array.isArray(existing.projects)) return normalizeState(existing);
+
+    // 尽量迁移旧版：扫描 localStorage，寻找包含 projects 数组的对象。
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || key === PROVIDER_KEY) continue;
+      const candidate = safeParse(localStorage.getItem(key), null);
+      if (candidate && Array.isArray(candidate.projects) && candidate.projects.length) {
+        const migrated = normalizeState(candidate);
+        localStorage.setItem(STATE_KEY, JSON.stringify(migrated));
+        return migrated;
+      }
     }
+    const p = C.createProject('我的小说');
+    return { projects: [p], currentProjectId: p.id, schemaVersion: 6 };
+  }
+
+  function normalizeState(s) {
+    const projects = (s.projects || []).map(C.normalizeProject);
+    if (!projects.length) projects.push(C.createProject('我的小说'));
+    let currentProjectId = s.currentProjectId || s.activeProjectId || projects[0].id;
+    if (!projects.some(p => p.id === currentProjectId)) currentProjectId = projects[0].id;
+    return { projects, currentProjectId, schemaVersion: 6 };
+  }
+
+  function loadProviderConfigs() {
+    const saved = safeParse(localStorage.getItem(PROVIDER_KEY), {});
+    const out = {};
+    Object.keys(C.PROVIDERS).forEach(id => { out[id] = C.providerConfig(saved, id); });
+    return out;
   }
 
   function saveState() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    state.schemaVersion = 6;
+    localStorage.setItem(STATE_KEY, JSON.stringify(state));
+  }
+  function saveProviderConfigs() {
+    localStorage.setItem(PROVIDER_KEY, JSON.stringify(providerConfigs));
+  }
+  function project() { return state.projects.find(p => p.id === state.currentProjectId) || state.projects[0]; }
+  function chapter() { const p = project(); return p.chapters.find(c => c.id === p.currentChapterId) || p.chapters[0]; }
+
+  function syncEditorToState() {
+    const p = project(), c = chapter();
+    if (!p || !c) return;
+    c.title = $('chapterTitle').value.trim() || c.title || '未命名章节';
+    c.outline = $('chapterOutline').value;
+    c.content = $('chapterContent').value;
+    c.updatedAt = Date.now();
+    p.aiProvider = $('writeProvider').value || p.aiProvider || 'deepseek';
+    qsa('[data-project-field]').forEach(el => { p[el.dataset.projectField] = el.value; });
+    p.updatedAt = Date.now();
   }
 
-  function project() {
-    return state.projects.find(p => p.id === state.currentId) || state.projects[0];
+  function renderAll() {
+    renderProviderOptions();
+    renderProjectOptions();
+    renderProjectFields();
+    renderChapter();
+    renderChapterList();
+    renderProviderSettings();
+    $('projectBadge').textContent = project().name + ' · ' + chapter().title;
   }
 
-  function markUpdated(p) { p.updated_at = new Date().toISOString(); }
-
-  function showStatus(text, isError = false, persistent = false) {
-    const s = $('status');
-    s.textContent = text;
-    s.classList.toggle('error', !!isError);
-    s.classList.add('show');
-    if (statusTimer) clearTimeout(statusTimer);
-    if (!persistent) statusTimer = setTimeout(() => s.classList.remove('show'), 4200);
+  function renderProviderOptions() {
+    const ids = Object.keys(C.PROVIDERS);
+    const html = ids.map(id => `<option value="${id}">${escapeHtml(C.PROVIDERS[id].name)}</option>`).join('');
+    const currentWrite = project().aiProvider || 'deepseek';
+    $('writeProvider').innerHTML = html;
+    $('writeProvider').value = C.PROVIDERS[currentWrite] ? currentWrite : 'deepseek';
+    const currentSetting = $('providerSelect').value || currentWrite;
+    $('providerSelect').innerHTML = html;
+    $('providerSelect').value = C.PROVIDERS[currentSetting] ? currentSetting : 'deepseek';
+    $('providerCards').innerHTML = ids.filter(id => id !== 'custom').map(id => {
+      const p = C.PROVIDERS[id];
+      return `<div class="provider-card"><b>${escapeHtml(p.name)}</b><span>${escapeHtml(p.model)}</span></div>`;
+    }).join('');
   }
 
-  function nav(page) {
-    document.querySelectorAll('.page').forEach(el => el.classList.toggle('active', el.dataset.page === page));
-    document.querySelectorAll('[data-nav]').forEach(el => el.classList.toggle('active', el.dataset.nav === page));
-    window.scrollTo(0, 0);
+  function renderProjectOptions() {
+    $('projectSelect').innerHTML = state.projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+    $('projectSelect').value = project().id;
   }
 
-  function fillSelect(select, value) {
-    if (![...select.options].some(o => o.value === value || o.text === value)) {
-      const o = document.createElement('option'); o.value = value; o.textContent = value; select.appendChild(o);
-    }
-    select.value = value;
-  }
-
-  function refreshProjectSelects() {
-    const selects = [$('homeProject'), $('novelProject'), $('worldProject'), $('projectSelect')];
-    for (const sel of selects) {
-      sel.innerHTML = '';
-      state.projects.forEach(p => {
-        const o = document.createElement('option');
-        o.value = p.id; o.textContent = `${p.name}（${(p.chapters || []).length}章）`; sel.appendChild(o);
-      });
-      sel.value = state.currentId;
-    }
+  function renderProjectFields() {
     const p = project();
-    $('projectPill').textContent = `当前：${p.name} · ${(p.chapters || []).length}章 · ${p.genre} · ${p.style}`;
+    qsa('[data-project-field]').forEach(el => { el.value = p[el.dataset.projectField] || ''; });
   }
 
-  function loadProjectToUI() {
+  function renderChapter() {
+    const c = chapter();
+    $('chapterTitle').value = c.title || '';
+    $('chapterOutline').value = c.outline || '';
+    $('chapterContent').value = c.content || '';
+  }
+
+  function renderChapterList() {
     const p = project();
-    refreshProjectSelects();
-    fillSelect($('genre'), p.genre || '玄幻'); fillSelect($('flow'), p.flow || '幕后流'); fillSelect($('style'), p.style || '情感细腻风');
-    fillSelect($('pov'), p.pov || '第三人称'); fillSelect($('pace'), p.pace || '张弛有度');
-    $('protagonist').value = p.protagonist || ''; $('characters').value = p.characters || ''; $('plot').value = p.plot || '';
-    $('world').value = p.world || ''; $('realms').value = p.realms || ''; $('currentRealm').value = p.current_realm || '';
-    $('outline').value = p.outline || ''; $('volumeOutline').value = p.volume_outline || ''; $('chapterOutline').value = p.chapter_outline || '';
-    $('homeOutput').value = p.draft || '';
-    $('homeTitle').value = `第${C.nextChapterNo(p)}章`;
-    $('renameProjectName').value = p.name || '';
-    selectedChapterNo = null;
-    refreshChapterList();
+    $('chapterList').innerHTML = p.chapters.map((c, i) => `
+      <div class="chapter-item ${c.id === p.currentChapterId ? 'active' : ''}" data-chapter-id="${c.id}">
+        <div><b>${escapeHtml(c.title)}</b><div class="chapter-meta">${(c.content || '').length} 字符</div></div>
+        <span>›</span>
+      </div>`).join('');
+    qsa('.chapter-item').forEach(el => el.addEventListener('click', () => {
+      syncEditorToState();
+      p.currentChapterId = el.dataset.chapterId;
+      saveState(); renderAll(); showTab('write');
+    }));
   }
 
-  function saveNovelFields(silent = false) {
+  function renderProviderSettings() {
+    const id = $('providerSelect').value || project().aiProvider || 'deepseek';
+    const cfg = providerConfigs[id] || C.providerConfig({}, id);
+    $('providerEndpoint').value = cfg.endpoint || '';
+    $('providerModel').value = cfg.model || '';
+    $('providerHelp').textContent = cfg.help || C.PROVIDERS[id]?.help || '';
+    const a = android();
+    let has = false;
+    try { has = !!(a && a.hasApiKey(id)); } catch (_) {}
+    $('keyState').textContent = has ? '✓ 已安全保存 API Key' : '尚未保存 API Key';
+    $('keyState').className = 'status ' + (has ? 'ok' : '');
+    $('apiKey').value = '';
+  }
+
+  function showTab(name) {
+    qsa('.tab').forEach(x => x.classList.toggle('active', x.id === 'tab-' + name));
+    qsa('.bottom-nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
+  }
+
+  function persistAndToast(msg) {
+    syncEditorToState(); saveState();
+    $('aiStatus').textContent = msg || '已保存';
+    $('aiStatus').className = 'status ok';
+    setTimeout(() => { if ($('aiStatus').textContent === msg) $('aiStatus').textContent = ''; }, 1300);
+  }
+
+  function addChapter() {
+    syncEditorToState();
     const p = project();
-    p.genre = $('genre').value; p.flow = $('flow').value; p.style = $('style').value; p.pov = $('pov').value; p.pace = $('pace').value;
-    p.protagonist = $('protagonist').value.trim(); p.characters = $('characters').value; p.plot = $('plot').value; markUpdated(p); saveState(); refreshProjectSelects();
-    if (!silent) showStatus('小说设定已保存');
-    return true;
+    const ch = C.createChapter(p.chapters.length + 1);
+    p.chapters.push(ch); p.currentChapterId = ch.id; p.updatedAt = Date.now();
+    saveState(); renderAll(); showTab('write');
   }
 
-  function saveWorldFields(silent = false) {
-    const p = project(); p.world = $('world').value; p.realms = $('realms').value; p.current_realm = $('currentRealm').value.trim(); p.outline = $('outline').value;
-    p.volume_outline = $('volumeOutline').value; p.chapter_outline = $('chapterOutline').value; markUpdated(p); saveState();
-    if (!silent) showStatus('世界观与大纲已保存');
-    return true;
-  }
-
-  function refreshChapterList() {
-    const list = $('chapterList'); list.innerHTML = '';
-    const p = project();
-    C.sortChapters(p.chapters);
-    if (!p.chapters.length) {
-      const span = document.createElement('span'); span.className = 'hint'; span.textContent = '暂无已保存章节'; list.appendChild(span);
-      $('chapterTitle').value = ''; $('chapterBody').value = ''; return;
-    }
-    p.chapters.forEach(c => {
-      const b = document.createElement('button'); b.className = 'chapter-chip' + (Number(c.no) === Number(selectedChapterNo) ? ' active' : '');
-      b.textContent = `${c.no}. ${c.title}`; b.onclick = () => { selectedChapterNo = c.no; refreshChapterList(); showSelectedChapter(); }; list.appendChild(b);
-    });
-  }
-
-  function showSelectedChapter() {
-    const c = project().chapters.find(x => Number(x.no) === Number(selectedChapterNo));
-    if (!c) return;
-    $('chapterTitle').value = c.title || ''; $('chapterBody').value = c.body || '';
-  }
-
-  function switchProject(id) {
-    if (!state.projects.some(p => p.id === id)) return;
-    state.currentId = id; saveState(); loadProjectToUI(); showStatus('已切换项目：' + project().name);
-  }
-
-  function settingsFromUI() {
-    return { endpoint: $('endpoint').value.trim() || C.DEFAULT_ENDPOINT, model: $('model').value.trim() || 'deepseek-chat', thinking: $('thinking').value, rememberKey: $('rememberKey').checked };
-  }
-
-  function getApiKey() { return $('apiKey').value.trim(); }
-
-  function saveSettings(show = true) {
-    state.settings = settingsFromUI();
+  function deleteCurrentChapter() {
+    syncEditorToState();
+    const p = project(), c = chapter();
+    if (!c) return alert('当前没有可删除章节');
+    if (!confirm(`确定删除“${c.title}”吗？\n删除后无法恢复。`)) return;
+    const result = C.deleteCurrentChapter(p);
+    if (!result.ok) return alert(result.reason || '删除失败');
     saveState();
-    const key = getApiKey();
-    if (state.settings.rememberKey && key && window.Native && Native.saveApiKey) {
-      const r = Native.saveApiKey(key);
-      if (String(r).startsWith('ERR|')) { showStatus('API Key 加密保存失败：' + String(r).slice(4), true); return false; }
-    } else if (!state.settings.rememberKey && window.Native && Native.clearApiKey) {
-      Native.clearApiKey();
+    renderAll();
+    $('aiStatus').textContent = `已删除：${result.deleted.title}`;
+    $('aiStatus').className = 'status ok';
+  }
+
+  function buildWritePrompt(kind) {
+    syncEditorToState();
+    const p = project(), c = chapter();
+    if (kind === 'realm') {
+      return `请根据以下小说设定设计完整、清晰、有递进感的境界/力量体系。\n小说类型：${p.genre}\n世界观：${p.world}\n主角：${p.protagonist}\n请直接输出可粘贴到“境界体系”的正文。`;
     }
-    if (show) showStatus('API 设置已保存');
-    return true;
-  }
-
-  function loadSettingsUI() {
-    const s = state.settings;
-    $('endpoint').value = s.endpoint || C.DEFAULT_ENDPOINT; fillSelect($('model'), s.model || 'deepseek-chat'); fillSelect($('thinking'), s.thinking || '关闭'); $('rememberKey').checked = s.rememberKey !== false;
-    if ($('rememberKey').checked && window.Native && Native.loadApiKey) {
-      const key = Native.loadApiKey(); if (key) $('apiKey').value = key;
+    if (kind === 'outline') {
+      return `请根据以下信息生成小说总纲与当前卷纲，包含核心矛盾、阶段目标、反转和伏笔。\n类型：${p.genre}\n流派：${p.webGenre}\n世界观：${p.world}\n主角：${p.protagonist}\n剧情脉络：${p.plot}\n请用“【总纲】”和“【卷纲】”分段输出。`;
     }
-    $('versionText').textContent = (window.Native && Native.appVersion) ? Native.appVersion() : C.APP_VERSION;
+    const context = C.recentContext(p, parseInt($('contextCount').value || '2', 10));
+    return [
+      `请续写当前章节“${c.title}”。`,
+      `本章小纲：${c.outline || '无'}`,
+      `目标约 ${parseInt($('targetWords').value || '2200', 10)} 字。`,
+      $('extraPrompt').value && ('特殊要求：' + $('extraPrompt').value),
+      context && ('最近章节正文：\n' + context),
+      c.content && ('当前章节已有正文（从末尾继续，勿重复）：\n' + c.content),
+      '只输出续写正文，不要解释，不要使用“以下是续写”等前缀。'
+    ].filter(Boolean).join('\n\n');
   }
 
-  function nativePost(endpoint, key, body) {
-    return new Promise((resolve, reject) => {
-      if (!window.Native || !Native.postAsync) { reject(new Error('当前环境没有 Android 原生网络桥接')); return; }
-      const id = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-      pending.set(id, { resolve, reject }); activeRequestId = id;
-      Native.postAsync(id, endpoint, key, body);
-    });
+  function startAi(kind) {
+    if (activeRequestId) return;
+    syncEditorToState(); saveState();
+    const p = project();
+    const providerId = p.aiProvider || $('writeProvider').value || 'deepseek';
+    const cfg = providerConfigs[providerId] || C.providerConfig({}, providerId);
+    const a = android();
+    if (!a) return setAiError('当前不是 Android 原生环境，无法发起 API 请求');
+    try {
+      if (!a.hasApiKey(providerId)) return setAiError(`请先在“AI 接口”中保存 ${C.PROVIDERS[providerId]?.name || providerId} 的 API Key`);
+    } catch (_) {}
+    if (!cfg.endpoint || !cfg.model) return setAiError('请先设置接口地址和模型');
+
+    activeRequestId = nowId(kind);
+    activeRequestKind = kind;
+    $('generateBtn').disabled = true; $('stopBtn').classList.remove('hidden');
+    $('aiStatus').textContent = `${C.PROVIDERS[providerId]?.name || providerId} 正在生成……`;
+    $('aiStatus').className = 'status';
+    const maxTokens = kind === 'write' ? Math.max(512, Math.ceil(parseInt($('targetWords').value || '2200', 10) * 1.8)) : 4096;
+    const system = C.buildSystemPrompt(p);
+    const user = buildWritePrompt(kind);
+    try {
+      a.aiRequest(activeRequestId, providerId, cfg.endpoint, cfg.model, system, user,
+        parseFloat($('temperature').value || '0.8'), maxTokens);
+    } catch (e) {
+      finishAi(); setAiError(String(e));
+    }
   }
 
-  window.__nativeHttpResult = (id, status, body, error) => {
-    const p = pending.get(id); if (!p) return;
-    pending.delete(id); if (activeRequestId === id) activeRequestId = null;
-    if (error) p.reject(new Error(error)); else p.resolve({ status: Number(status), body: body || '' });
+  window.onNativeAiResult = function(requestId, ok, payload) {
+    if (requestId !== activeRequestId && !requestId.startsWith('test_')) return;
+    if (requestId.startsWith('test_')) {
+      $('providerTestStatus').textContent = ok ? ('✓ 连接成功：' + payload.slice(0,80)) : ('连接失败：' + payload);
+      $('providerTestStatus').className = 'status ' + (ok ? 'ok' : 'err');
+      return;
+    }
+    const kind = activeRequestKind;
+    finishAi();
+    if (!ok) return setAiError(payload);
+    const p = project();
+    if (kind === 'write') {
+      const c = chapter();
+      c.content = [c.content.trim(), payload.trim()].filter(Boolean).join('\n\n');
+      c.updatedAt = Date.now();
+      $('chapterContent').value = c.content;
+    } else if (kind === 'realm') {
+      p.realms = payload.trim();
+      const el = document.querySelector('[data-project-field="realms"]'); if (el) el.value = p.realms;
+    } else if (kind === 'outline') {
+      const text = payload.trim();
+      const m = text.match(/【总纲】([\s\S]*?)(?:【卷纲】|$)/);
+      const v = text.match(/【卷纲】([\s\S]*)/);
+      p.masterOutline = (m ? m[1] : text).trim();
+      p.volumeOutline = (v ? v[1] : p.volumeOutline).trim();
+      renderProjectFields();
+    }
+    saveState();
+    $('aiStatus').textContent = '生成完成并已保存';
+    $('aiStatus').className = 'status ok';
   };
 
-  function cancelActive() {
-    if (activeRequestId && window.Native && Native.cancelRequest) Native.cancelRequest(activeRequestId);
-    showStatus('正在停止…', false, true);
+  function finishAi() {
+    activeRequestId = ''; activeRequestKind = '';
+    $('generateBtn').disabled = false; $('stopBtn').classList.add('hidden');
+  }
+  function setAiError(msg) { $('aiStatus').textContent = msg; $('aiStatus').className = 'status err'; }
+
+  function stopAi() {
+    if (!activeRequestId) return;
+    try { android()?.cancelRequest(activeRequestId); } catch (_) {}
+    finishAi(); $('aiStatus').textContent = '已停止生成'; $('aiStatus').className = 'status';
   }
 
-  async function callDeepSeek(system, user, maxTokens) {
-    const key = getApiKey(); if (!key) throw new Error('请先在设置页填写 DeepSeek API Key');
-    const s = settingsFromUI();
-    const payload = C.chatPayload(s, system, user, maxTokens);
-    const r = await nativePost(s.endpoint || C.DEFAULT_ENDPOINT, key, JSON.stringify(payload));
-    let data = null; try { data = JSON.parse(r.body); } catch (_) {}
-    if (r.status < 200 || r.status >= 300) {
-      const msg = data && data.error && data.error.message ? data.error.message : (r.body || `HTTP ${r.status}`);
-      throw new Error(`DeepSeek API 错误（HTTP ${r.status}）：${String(msg).slice(0, 800)}`);
-    }
-    if (!data || !Array.isArray(data.choices) || !data.choices.length) throw new Error('API 没有返回 choices');
-    const text = String((data.choices[0].message || {}).content || '').trim();
-    if (!text) throw new Error('API 返回正文为空，可尝试关闭思考模式或切换模型');
-    return { text, usage: data.usage || {} };
-  }
-
-  async function withBusy(kind, task) {
-    const ids = ['btnGenerate','btnTestApi','btnGenRealms','btnGenOutline']; ids.forEach(id => $(id).disabled = true); $('btnStop').disabled = false;
-    showStatus(kind + '处理中…', false, true);
-    try { await task(); }
-    catch (e) {
-      const msg = String(e && e.message || e);
-      if (/disconnect|Socket|cancel|aborted|unexpected end/i.test(msg)) showStatus('已停止生成'); else showStatus(msg, true);
-    } finally {
-      ids.forEach(id => $(id).disabled = false); $('btnStop').disabled = true; activeRequestId = null;
-    }
-  }
-
-  async function generateNovel() {
-    saveNovelFields(true); saveWorldFields(true); saveSettings(false);
+  function fullNovelText() {
+    syncEditorToState();
     const p = project();
-    const prompt = C.buildNovelPrompt({ project: p, chapterTitle: $('homeTitle').value, instructions: $('homeInstructions').value, context: $('homeContext').value, targetChars: Number($('homeTarget').value) || 3500 });
-    await withBusy('正在续写', async () => {
-      const r = await callDeepSeek(prompt.system, prompt.user, C.maxTokensForTarget(prompt.target));
-      $('homeOutput').value = r.text; p.draft = r.text; markUpdated(p); saveState();
-      showStatus(`续写完成 · ${Number(r.usage.total_tokens) || 0} tokens`);
-    });
-  }
-
-  async function generateRealms() {
-    saveNovelFields(true); saveWorldFields(true); saveSettings(false);
-    const pr = C.realmsPrompt(project());
-    await withBusy('正在生成境界体系', async () => {
-      const r = await callDeepSeek(pr.system, pr.user, 3500); $('realms').value = r.text; project().realms = r.text; markUpdated(project()); saveState(); showStatus('AI 境界体系已生成并保存');
-    });
-  }
-
-  async function generateOutline() {
-    saveNovelFields(true); saveWorldFields(true); saveSettings(false);
-    const pr = C.outlinePrompt(project());
-    await withBusy('正在生成总纲/卷纲', async () => {
-      const r = await callDeepSeek(pr.system, pr.user, 5000); $('outline').value = r.text; project().outline = r.text; markUpdated(project()); saveState(); showStatus('AI 总纲已生成并保存');
-    });
-  }
-
-  async function testApi() {
-    saveSettings(false);
-    await withBusy('正在测试 API', async () => {
-      const r = await callDeepSeek('你是API连接测试助手。', '只回复四个字：连接成功', 128);
-      if ($('rememberKey').checked && window.Native && Native.saveApiKey) Native.saveApiKey(getApiKey());
-      showStatus('API 连接成功：' + r.text);
-    });
-  }
-
-  function saveGeneratedChapter() {
-    const p = project(); const body = $('homeOutput').value.trim(); if (!body) return showStatus('续写结果为空，无法保存', true);
-    const no = C.nextChapterNo(p); const title = $('homeTitle').value.trim() || `第${no}章`;
-    try { C.upsertChapter(p, no, title, body); p.draft = ''; $('homeOutput').value = ''; $('homeTitle').value = `第${C.nextChapterNo(p)}章`; saveState(); refreshProjectSelects(); refreshChapterList(); showStatus(`第 ${no} 章已保存`); }
-    catch (e) { showStatus(e.message, true); }
-  }
-
-  function exportNovel() {
-    const p = project(); const text = C.fullNovelText(p); if (!text) return showStatus('当前项目没有已保存章节', true);
-    const filename = C.safeFileName(p.name) + '_完整小说.txt';
-    if (window.Native && Native.saveTextFile) {
-      const r = String(Native.saveTextFile(filename, text));
-      if (r.startsWith('OK|')) showStatus('TXT 已导出：' + r.slice(3)); else showStatus('导出失败：' + r.replace(/^ERR\|/, ''), true);
-    } else showStatus('当前环境不支持文件导出', true);
+    return `${p.name}\n\n` + p.chapters.map(c => `${c.title}\n\n${c.content || ''}`).join('\n\n\n');
   }
 
   function bind() {
-    document.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => nav(b.dataset.nav));
-    [$('homeProject'),$('novelProject'),$('worldProject'),$('projectSelect')].forEach(sel => sel.onchange = () => switchProject(sel.value));
-    $('btnRecent').onclick = () => { $('homeContext').value = C.recentContext(project(), Number($('homeRecent').value)); showStatus('最近章节已载入续写上下文'); };
-    $('btnGenerate').onclick = generateNovel; $('btnStop').onclick = cancelActive; $('btnSaveChapter').onclick = saveGeneratedChapter;
-    $('btnCopy').onclick = () => { if (window.Native && Native.copyText) Native.copyText($('homeOutput').value); showStatus('续写结果已复制'); };
-    $('btnClear').onclick = () => { if ($('homeOutput').value.trim() && !confirm('只清空当前未入库的续写结果，确定吗？')) return; $('homeOutput').value=''; project().draft=''; saveState(); showStatus('续写结果已清空'); };
-    $('homeOutput').oninput = () => { project().draft = $('homeOutput').value; saveState(); };
-    $('btnSaveNovel').onclick = () => saveNovelFields(false); $('btnSaveWorld').onclick = () => saveWorldFields(false); $('btnGenRealms').onclick = generateRealms; $('btnGenOutline').onclick = generateOutline;
-    $('btnNewProject').onclick = () => { const name=$('newProjectName').value.trim(); if(!name)return showStatus('请填写项目名称',true); const p=C.newProject(name); state.projects.unshift(p); state.currentId=p.id; $('newProjectName').value=''; saveState(); loadProjectToUI(); showStatus('已新建项目 '+name); };
-    $('btnRenameProject').onclick = () => { const name=$('renameProjectName').value.trim(); if(!name)return showStatus('项目名称不能为空',true); project().name=name; markUpdated(project()); saveState(); refreshProjectSelects(); showStatus('项目已重命名为 '+name); };
-    $('btnDeleteProject').onclick = () => { if(state.projects.length<=1)return showStatus('至少保留一个小说项目',true); if(!confirm(`确定删除整个项目「${project().name}」吗？`))return; state.projects=state.projects.filter(p=>p.id!==state.currentId); state.currentId=state.projects[0].id; saveState(); loadProjectToUI(); showStatus('项目已删除'); };
-    $('btnRenameChapter').onclick = () => { if(selectedChapterNo==null)return showStatus('请先选择章节',true); if(!C.renameChapter(project(),selectedChapterNo,$('chapterTitle').value))return showStatus('章节标题不能为空',true); saveState(); refreshChapterList(); showStatus('章节标题已修改'); };
-    $('btnSaveChapterEdit').onclick = () => { if(selectedChapterNo==null)return showStatus('请先选择章节',true); try{C.upsertChapter(project(),selectedChapterNo,$('chapterTitle').value,$('chapterBody').value);saveState();refreshChapterList();refreshProjectSelects();showStatus('章节修改已保存');}catch(e){showStatus(e.message,true);} };
-    $('btnDeleteChapter').onclick = () => { if(selectedChapterNo==null)return showStatus('请先选择章节',true); const c=project().chapters.find(x=>Number(x.no)===Number(selectedChapterNo)); if(!c)return; if(!confirm(`确定删除「${c.title}」吗？`))return; C.deleteChapter(project(),selectedChapterNo);selectedChapterNo=null;saveState();refreshChapterList();refreshProjectSelects();showStatus('章节已删除'); };
-    $('btnAsContext').onclick = () => { const c=project().chapters.find(x=>Number(x.no)===Number(selectedChapterNo)); if(!c)return showStatus('请先选择章节',true); $('homeContext').value=c.body;nav('home');showStatus('已将所选章节放入续写上下文'); };
-    $('btnExport').onclick = exportNovel;
-    $('btnShareNovel').onclick = () => { const t=C.fullNovelText(project()); if(!t)return showStatus('当前没有已保存章节',true); if(window.Native&&Native.shareText)Native.shareText(project().name,t); };
-    $('btnShowKey').onclick = () => { const i=$('apiKey'); const show=i.type==='password';i.type=show?'text':'password';$('btnShowKey').textContent=show?'隐藏':'显示'; };
-    $('btnSaveSettings').onclick = () => saveSettings(true); $('btnTestApi').onclick = testApi;
-    $('btnClearKey').onclick = () => { if(!confirm('确定清除本机保存的 API Key 吗？'))return; $('apiKey').value=''; if(window.Native&&Native.clearApiKey)Native.clearApiKey();showStatus('本机 API Key 已清除'); };
+    qsa('.bottom-nav button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+    $('saveAllBtn').addEventListener('click', () => persistAndToast('已保存'));
+    $('saveChapterBtn').addEventListener('click', () => persistAndToast('本章已保存'));
+    $('newChapterBtn').addEventListener('click', addChapter);
+    $('projectNewChapterBtn').addEventListener('click', addChapter);
+    $('deleteChapterBtn').addEventListener('click', deleteCurrentChapter);
+    $('renameChapterBtn').addEventListener('click', () => {
+      syncEditorToState(); const c = chapter(); const n = prompt('新的章节标题', c.title); if (!n?.trim()) return;
+      c.title = n.trim(); saveState(); renderAll();
+    });
+    $('projectSelect').addEventListener('change', e => { syncEditorToState(); state.currentProjectId = e.target.value; saveState(); renderAll(); });
+    $('newProjectBtn').addEventListener('click', () => {
+      syncEditorToState(); const name = prompt('项目名称', '新小说'); if (!name?.trim()) return;
+      const p = C.createProject(name.trim()); state.projects.push(p); state.currentProjectId = p.id; saveState(); renderAll();
+    });
+    $('renameProjectBtn').addEventListener('click', () => {
+      const p = project(); const name = prompt('新的项目名称', p.name); if (!name?.trim()) return;
+      p.name = name.trim(); saveState(); renderAll();
+    });
+    $('deleteProjectBtn').addEventListener('click', () => {
+      if (state.projects.length <= 1) return alert('至少保留一个项目');
+      const p = project(); if (!confirm(`确定删除项目“${p.name}”及其全部章节吗？`)) return;
+      state.projects = state.projects.filter(x => x.id !== p.id); state.currentProjectId = state.projects[0].id; saveState(); renderAll();
+    });
+    $('writeProvider').addEventListener('change', e => { project().aiProvider = e.target.value; saveState(); });
+    $('generateBtn').addEventListener('click', () => startAi('write'));
+    $('stopBtn').addEventListener('click', stopAi);
+    $('aiRealmBtn').addEventListener('click', () => startAi('realm'));
+    $('aiOutlineBtn').addEventListener('click', () => startAi('outline'));
+
+    $('providerSelect').addEventListener('change', renderProviderSettings);
+    $('saveProviderBtn').addEventListener('click', () => {
+      const id = $('providerSelect').value;
+      providerConfigs[id] = Object.assign({}, providerConfigs[id] || C.PROVIDERS[id], {
+        endpoint: $('providerEndpoint').value.trim(), model: $('providerModel').value.trim()
+      });
+      saveProviderConfigs(); $('providerTestStatus').textContent = '接口配置已保存'; $('providerTestStatus').className = 'status ok';
+    });
+    $('resetProviderBtn').addEventListener('click', () => {
+      const id = $('providerSelect').value; providerConfigs[id] = C.providerConfig({}, id); saveProviderConfigs(); renderProviderSettings();
+    });
+    $('saveKeyBtn').addEventListener('click', () => {
+      const id = $('providerSelect').value, key = $('apiKey').value.trim();
+      if (!key) return alert('请输入 API Key');
+      const a = android(); if (!a) return alert('当前不是 Android 原生环境');
+      const result = a.saveApiKey(id, key);
+      $('apiKey').value = '';
+      if (String(result).startsWith('ok')) renderProviderSettings(); else alert('保存失败：' + result);
+    });
+    $('testProviderBtn').addEventListener('click', () => {
+      const id = $('providerSelect').value, cfg = providerConfigs[id];
+      const a = android(); if (!a) return alert('当前不是 Android 原生环境');
+      $('providerTestStatus').textContent = '正在测试连接……'; $('providerTestStatus').className = 'status';
+      a.testProvider('test_' + Date.now(), id, cfg.endpoint, cfg.model);
+    });
+    $('exportBtn').addEventListener('click', () => { android()?.exportText(project().name + '.txt', fullNovelText()); });
+    $('shareBtn').addEventListener('click', () => { android()?.shareText(project().name, fullNovelText()); });
+
+    ['chapterTitle','chapterOutline','chapterContent'].forEach(id => $(id).addEventListener('change', () => { syncEditorToState(); saveState(); renderChapterList(); }));
+    qsa('[data-project-field]').forEach(el => el.addEventListener('change', () => { syncEditorToState(); saveState(); }));
   }
 
-  document.addEventListener('DOMContentLoaded', () => {
-    state = loadState(); bind(); loadSettingsUI(); loadProjectToUI();
-    if (window.Native && Native.reportReady) Native.reportReady();
-  });
+  renderAll(); bind();
+  setTimeout(() => { try { android()?.appReady(); } catch (_) {} }, 250);
 })();
